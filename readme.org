@@ -1,0 +1,15 @@
+* Spelling bee
+
+this is an implementation of [[https://www.nytimes.com/puzzles/spelling-bee][the New York Times' Spelling Bee game]] in [[https://coalton-lang.github.io/][Coalton]]. to run it,
+you'll need to download the [[http://wordlist.aspell.net/][SCOWL corpus]] and unpack it in the same repository as the code
+(or edit the definition of ~scowl-data-path~ in [[file:package.lisp][package.lisp]] to point to where you
+unpacked the corpus). you'll also need a recent clone of the Coalton repo where ASDF can
+find it. to run, load the system ~"spellingbee"~, then do:
+
+#+begin_src lisp
+  (cl:in-package :spellingbee/package)
+
+  (coalton (run-puzzle! (file:standard-input)
+                        (file:standard-output)
+                        (random-puzzle)))
+#+end_src
