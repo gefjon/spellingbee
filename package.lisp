@@ -99,7 +99,7 @@
       iter:flatten!
       iter:remove-duplicates!
       iter:collect-vector!))
-  
+
   (declare relevant-scowl-filenames (List String))
   (define relevant-scowl-filenames
     (make-list "american-words.10"
@@ -118,7 +118,7 @@
   (declare scowl-data-path String)
   (define scowl-data-path
     (lisp String ()
-      (cl:namestring 
+      (cl:namestring
        (asdf:system-relative-pathname "spellingbee"
                                       "scowl-2020.12.07/final/"
                                       :type :directory)))))
@@ -146,9 +146,9 @@
 
 (view:derive-eq (Eq Puzzle)
   (and .all-letters-mask
-       .all-letters
        .center-letter-mask
        .center-letter
+       .outside-letters
        .available-words
        .found-words))
 
@@ -228,6 +228,8 @@
           ((Some puz) (view:update .found-words (Cons word) puz)))
         None)))
 
+;; printing puzzles
+
 (coalton-toplevel
   (define-instance (file:Show Puzzle)
     (define (file:show! file puz)
@@ -236,13 +238,6 @@
       (let print = (file:show! file))
       (let line = (file:write-line! file))
       (let newline = (fn () (file:newline! file)))
-      (let indent = (fn () (str "  ")))
-      
-      (line "found words:")
-      (iter:for-each! (fn (word)
-                        (indent)
-                        (line word))
-                      (iter:list-iter (view:get .found-words puz)))
 
       (str "center letter: ")
       (char (view:get .center-letter puz))
@@ -254,6 +249,83 @@
       (print (length (view:get .available-words puz)))
       (newline))))
 
+;; displaying already-found words
+
+(coalton-toplevel
+  (declare indented-word-list! (file:Output -> (List String) -> Unit))
+  (define (indented-word-list! file words)
+    (let indent = (fn () (file:write-string! file "  ")))
+    (let line = (file:write-line! file))
+
+    (let print-word =
+      (fn (word)
+        (indent)
+        (line word)))
+
+    (iter:for-each! print-word
+                    (iter:list-iter words)))
+
+  (declare print-found-words! (file:Output -> (List String) -> Unit))
+  (define (print-found-words! file words)
+    (file:write-line! file "found words:")
+    (indented-word-list! file words))
+
+  (declare print-spoiler! (file:Output -> (List String) -> Unit))
+  (define (print-spoiler! file words)
+    (file:write-line! file "remaining words:")
+    (indented-word-list! file words)))
+
+;; bigram-based hints
+
+(coalton-toplevel
+  (declare leading-bigram (String -> String))
+  (define (leading-bigram word)
+    (str:substring word 0 2))
+
+  (declare starts-with? (String -> String -> Boolean))
+  (define (starts-with? start str)
+    (let len = (str:length start))
+    (lisp Boolean (start str len)
+      (cl:not (cl:not ; hackery: `string=' is listed in the spec as returning "generalized boolean", so any
+                      ; non-`nil' object may be used to denote truth. `not not' coerces this into an actual
+                      ; `boolean'.
+               (cl:string= start str :end2 len)))))
+
+  (declare bigrams ((List String) -> (List String)))
+  (define (bigrams words)
+    (pipe words
+      iter:list-iter
+      (map leading-bigram)
+      iter:remove-duplicates!
+      iter:collect-list!
+      list:sort))
+
+  (declare bigram-words ((List String) -> String -> UFix))
+  (define (bigram-words words bigram)
+    (pipe words
+      iter:list-iter
+      (iter:filter! (starts-with? bigram))
+      iter:count!
+      fromInt))
+
+  (declare print-bigrams! (file:Output -> (List String) -> Unit))
+  (define (print-bigrams! file words)
+    (let str = (file:write-string! file))
+    (let print = (file:show! file))
+    (let newline = (fn () (file:newline! file)))
+
+    (let print-bigram =
+      (fn (bi)
+        (str bi)
+        (str ": ")
+        (print (bigram-words words bi))
+        (newline)))
+
+    (iter:for-each! print-bigram
+                    (iter:list-iter (bigrams words)))))
+
+;; the game itself
+
 (coalton-toplevel
   (declare word-score (String -> UFix))
   (define (word-score word)
@@ -261,18 +333,43 @@
     (if (== 4 len) 1
         (+ len
            (if (pangram? word) 7 0))))
-  
+
   (declare run-puzzle! (file:Input -> file:Output -> Puzzle -> UFix))
   (define (run-puzzle! in out puz)
     (let ((loop
             (fn (puz score)
               (file:show! out puz)
+              (prompt)
               (let word = (expect "Unable to read a guess"
                                   (file:read-line! in)))
-              (if (not (eligible-word? word))
-                  (progn (file:write-line! out "Invalid guess; try again.")
-                         (loop puz score))
-                  (make-guess puz score word))))
+              (cond
+                ((command? word)
+                 (command-dispatch word puz score))
+                ((not (eligible-word? word))
+                 (progn (file:write-line! out "Invalid guess; try again.")
+                        (loop puz score)))
+                (True (make-guess puz score word)))))
+
+          (prompt (fn () (file:write-string! out "> ")))
+
+          (command? (starts-with? ":"))
+
+          (command-dispatch
+            (fn (command puz score)
+              (match command
+                (":bigrams" (print-bigrams! out (view:get .available-words puz)))
+                (":found" (print-found-words! out (view:get .found-words puz)))
+                (":spoil" (print-spoiler! out (view:get .available-words puz)))
+                (":help" (file:write-line! out
+                                           "Type a word to guess it.
+Available commands are:
+  :bigrams - display the number of remaining words for each leading bigram.
+  :found   - show words you've already found
+  :spoil   - show remaining words
+  :help    - show this message"))
+                (_ (file:write-line! out "Unknown command. Try :help to see available commands.")))
+               (loop puz score)))
+
           (make-guess
             (fn (puz score word)
               (match (guess puz word)
@@ -281,6 +378,7 @@
                  (progn (file:write-line! out
                                           "Nope! guess again.")
                         (loop puz score))))))
+
           (correct-guess
             (fn (puz score word)
               (let gained-score = (word-score word))
@@ -291,4 +389,5 @@
               (if (list:null? (view:get .available-words puz))
                   new-score
                   (loop puz new-score)))))
+
       (loop puz 0))))

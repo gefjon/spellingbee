@@ -93,7 +93,7 @@
                         -> :container
                         -> (Optional :container)))
   (define (update view update-elt container)
-    (view-try-update view (coalton-prelude:compose Some update-elt) container))
+    (try-update view (coalton-prelude:compose Some update-elt) container))
 
   (declare compose ((View :container :middle)
                          -> (View :middle :elt)
