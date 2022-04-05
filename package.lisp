@@ -8,7 +8,8 @@
                     (#:vec :coalton-library/vector)
                     (#:bit :coalton-library/bits)
                     (#:char :coalton-library/char)
-                    (#:alex :alexandria)))
+                    (#:alex :alexandria)
+                    (#:cell :coalton-library/cell)))
 (cl:in-package :spellingbee/package)
 
 ;;; iter extensions
@@ -137,6 +138,7 @@
       iter:collect-vector!)))
 
 (view:define-struct Puzzle
+  (.score UFix)
   (.all-letters-mask UFix)
   (.center-letter-mask UFix)
   (.center-letter Char)
@@ -145,7 +147,8 @@
   (.found-words (List String)))
 
 (view:derive-eq (Eq Puzzle)
-  (and .all-letters-mask
+  (and .score
+       .all-letters-mask
        .center-letter-mask
        .center-letter
        .outside-letters
@@ -183,7 +186,8 @@
                    iter:vector-iter
                    (iter:filter! (word-in-puzzle? mask center-mask))
                    iter:collect-list!))
-    (Puzzle mask
+    (Puzzle 0
+            mask
             center-mask
             center-letter
             outside-letters
@@ -207,16 +211,27 @@
     (pangram-puzzle (expect "No available pangrams"
                             (random-elt pangrams))))
 
-  (declare remove ((Eq :elt) => :elt -> (List :elt) -> (Optional (List :elt))))
-  (define (remove elt lst)
+  (declare word-score (String -> UFix))
+  (define (word-score word)
+    (let len = (the UFix (fromInt (str:length word))))
+    (if (== 4 len) 1
+        (+ len
+           (if (pangram? word) 7 0))))
+
+  (declare remove-if ((:elt -> Boolean) -> (List :elt) -> (Optional (List :elt))))
+  (define (remove-if this? lst)
     (match lst
       ((Nil) None)
       ((Cons fst rst)
-       (if (== fst elt)
+       (if (this? fst)
            (Some rst)
-           (match (remove elt rst)
+           (match (remove-if this? rst)
              ((None) None)
              ((Some rst) (Some (Cons fst rst))))))))
+
+  (declare remove ((Eq :elt) => (:elt -> (List :elt) -> (Optional (List :elt)))))
+  (define (remove elt lst)
+    (remove-if (== elt) lst))
 
   (declare guess (Puzzle -> String -> (Optional Puzzle)))
   (define (guess puz word)
@@ -225,7 +240,12 @@
                          word)
         (match (view:try-update .available-words (remove word) puz)
           ((None) None)
-          ((Some puz) (view:update .found-words (Cons word) puz)))
+          ((Some puz)
+           (view:update .score
+                        (+ (word-score word))
+                        (unwrap (view:update .found-words
+                                             (Cons word)
+                                             puz)))))
         None)))
 
 ;; printing puzzles
@@ -239,6 +259,10 @@
       (let line = (file:write-line! file))
       (let newline = (fn () (file:newline! file)))
 
+      (str "current score: ")
+      (print (view:get .score puz))
+      (newline)
+
       (str "center letter: ")
       (char (view:get .center-letter puz))
       (newline)
@@ -246,8 +270,78 @@
       (line (view:get .outside-letters puz))
 
       (str "remaining words: ")
-      (print (length (view:get .available-words puz)))
+      (print (fromInt (length (view:get .available-words puz))))
       (newline))))
+
+;; commands during gameplay
+
+(view:define-struct Command
+  (.name String)
+  (.description String)
+  (.action (file:Input
+            -> file:Output
+            -> Puzzle
+            -> Unit)))
+
+(coalton-toplevel
+  (define-instance (file:Show Command)
+    (define (file:show! file com)
+      (match com
+        ((Command name description _)
+         (progn 
+           (file:write-char! file #\:)
+           (file:write-string! file name)
+           (file:write-string! file " - ")
+           (file:write-line! file description))))))
+  
+  (declare commands (cell:Cell (List Command)))
+  (define commands (cell:new Nil))
+
+  (declare list-replace ((:elt -> Boolean) -> :elt -> (List :elt) -> (List :elt)))
+  (define (list-replace old? new lst)
+    (Cons new (with-default lst (remove-if old? lst))))
+
+  (declare install-command (Command -> Unit))
+  (define (install-command com)
+    (let same? = (view:eq? .name com))
+    (cell:update! (list-replace same? com)
+                  commands)
+    Unit)
+
+  (declare input-command? (String -> Boolean))
+  (define (input-command? input)
+    (== #\:
+        (with-default #\space
+          (str:ref input 0))))
+
+  (declare skipping-substring? (UFix -> String -> String -> Boolean))
+  (define (skipping-substring? skip super sub)
+    (lisp Boolean (skip super sub)
+      (cl:not (cl:not (cl:string= sub super :start2 skip)))))
+
+  (declare find-command (String -> (Optional Command)))
+  (define (find-command input)
+    (let this? =
+      (compose (skipping-substring? 1 input)
+               (view:get .name)))
+    (iter:find! this? (iter:list-iter (cell:read commands))))
+
+  (declare run-command! (Command -> file:Input -> file:Output -> Puzzle -> Unit))
+  (define (run-command! com)
+    (view:get .action com)))
+
+(cl:defmacro define-command (name description (in out puz) cl:&body body)
+  (cl:let ((process-command (alex:symbolicate '#:do- name))
+           (command-obj (alex:symbolicate '#:command- name)))
+    `(cl:progn
+       (coalton-toplevel
+         (declare ,process-command (file:Input -> file:Output -> Puzzle -> Unit))
+         (define (,process-command ,in ,out ,puz)
+           ,@body)
+         (declare ,command-obj Command)
+         (define ,command-obj (Command ,name ,description ,process-command)))
+       (cl:eval-when (:load-toplevel)
+         (coalton (install-command ,command-obj))))))
 
 ;; displaying already-found words
 
@@ -274,6 +368,14 @@
   (define (print-spoiler! file words)
     (file:write-line! file "remaining words:")
     (indented-word-list! file words)))
+
+(define-command "found" "show words you've already found"
+    (_ out puz)
+  (print-found-words! out (view:get .found-words puz)))
+
+(define-command "spoil" "show remaining words"
+    (_ out puz)
+  (print-found-words! out (view:get .available-words puz)))
 
 ;; bigram-based hints
 
@@ -324,70 +426,69 @@
     (iter:for-each! print-bigram
                     (iter:list-iter (bigrams words)))))
 
+(define-command "bigrams" "display the number of remaining words for each leading bigram"
+    (_ out puz)
+  (print-bigrams! out (view:get .available-words puz)))
+
+;; help message
+
+(define-command "help" "print this message"
+    (_ out puz)
+  (file:write-line! out "Type a word to guess it.
+Available commands are:")
+  (let print-command =
+    (fn (com)
+      (file:write-string! out "  ")
+      (file:show! out com)))
+  (iter:for-each! print-command
+                  (iter:list-iter (cell:read commands))))
+
 ;; the game itself
 
 (coalton-toplevel
-  (declare word-score (String -> UFix))
-  (define (word-score word)
-    (let len = (the UFix (fromInt (str:length word))))
-    (if (== 4 len) 1
-        (+ len
-           (if (pangram? word) 7 0))))
-
-  (declare run-puzzle! (file:Input -> file:Output -> Puzzle -> UFix))
+  (declare run-puzzle! (file:Input -> file:Output -> Puzzle -> Puzzle))
   (define (run-puzzle! in out puz)
     (let ((loop
-            (fn (puz score)
+            (fn (puz)
               (file:show! out puz)
               (prompt)
               (let word = (expect "Unable to read a guess"
                                   (file:read-line! in)))
               (cond
-                ((command? word)
-                 (command-dispatch word puz score))
+                ((input-command? word)
+                 (command-dispatch word puz))
                 ((not (eligible-word? word))
                  (progn (file:write-line! out "Invalid guess; try again.")
-                        (loop puz score)))
-                (True (make-guess puz score word)))))
+                        (loop puz)))
+                (True (make-guess puz word)))))
 
           (prompt (fn () (file:write-string! out "> ")))
 
-          (command? (starts-with? ":"))
-
           (command-dispatch
-            (fn (command puz score)
-              (match command
-                (":bigrams" (print-bigrams! out (view:get .available-words puz)))
-                (":found" (print-found-words! out (view:get .found-words puz)))
-                (":spoil" (print-spoiler! out (view:get .available-words puz)))
-                (":help" (file:write-line! out
-                                           "Type a word to guess it.
-Available commands are:
-  :bigrams - display the number of remaining words for each leading bigram.
-  :found   - show words you've already found
-  :spoil   - show remaining words
-  :help    - show this message"))
-                (_ (file:write-line! out "Unknown command. Try :help to see available commands.")))
-               (loop puz score)))
+            (fn (com puz)
+              (match (find-command com)
+                ((Some com)
+                 (run-command! com in out puz))
+                ((None) (file:write-line! out "Unknown command. Try :help to see a list of available commands.")))
+               (loop puz)))
 
           (make-guess
-            (fn (puz score word)
+            (fn (puz word)
               (match (guess puz word)
-                ((Some puz) (correct-guess puz score word))
+                ((Some puz) (correct-guess puz word))
                 ((None)
                  (progn (file:write-line! out
                                           "Nope! guess again.")
-                        (loop puz score))))))
+                        (loop puz))))))
 
           (correct-guess
-            (fn (puz score word)
+            (fn (puz word)
               (let gained-score = (word-score word))
-              (let new-score = (+ score gained-score))
-              (file:write-string! out "Correct! Current score: ")
-              (file:show! out new-score)
-              (file:newline! out)
+              (file:write-string! out "Correct! Scored ")
+              (file:show! out gained-score)
+              (file:write-line! out " points.")
               (if (list:null? (view:get .available-words puz))
-                  new-score
-                  (loop puz new-score)))))
+                  puz
+                  (loop puz)))))
 
-      (loop puz 0))))
+      (loop puz))))

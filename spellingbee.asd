@@ -10,4 +10,5 @@
                                  :coalton-library/char
                                  :coalton-library/vector
                                  :coalton-library/string
-                                 :coalton-library/iterator))
+                                 :coalton-library/iterator
+                                 :coalton-library/cell))
