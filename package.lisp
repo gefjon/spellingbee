@@ -524,7 +524,7 @@ Available commands are:")
   (define (print-header! out mat)
     (file:write-string! out "   ")
     (print-vert-separator! out)
-    (dotimes (vec:length mat)
+    (dotimes (1- (vec:length mat))
       (fn (idx)
         (write-width-3! out (+ 4 idx))))
     (print-vert-separator! out)
@@ -556,8 +556,8 @@ Available commands are:")
 
     (file:newline! out))
 
-  (declare print-footer! (file:Output -> (Vector (Tuple Char (Vector UFix))) -> Unit))
-  (define (print-footer! out mat)
+  (declare print-footer! (file:Output -> (Vector (Tuple Char (Vector UFix))) -> Integer -> Unit))
+  (define (print-footer! out mat sum)
     (write-centered-3! out #\greek_capital_letter_sigma)
     (print-vert-separator! out)
 
@@ -572,25 +572,55 @@ Available commands are:")
                                                     (vec:index 0 mat)))
       (dotimes (vec:length row0)
         (compose (write-width-3! out) column-sum)))
+    (print-vert-separator! out)
+    (write-width-3! out sum)
     (file:newline! out))
+
+  (declare sort-matrix! ((Vector (Tuple Char (Vector UFix)))
+                         -> (Vector (Tuple Char (Vector UFix)))))
+  (define (sort-matrix! mat)
+    (vec:sort-by! (fn (left right)
+                    (< (fst left) (fst right)))
+                  mat)
+    mat)
 
   (declare print-matrix! (file:Output -> (List String) -> Unit))
   (define (print-matrix! out words)
-    (let mat = (compute-matrix words))
+    (let mat = (sort-matrix! (compute-matrix words)))
     (let ncells = (+ (fromInt (vec:length mat))
-                     4 ; one for the letters on the left, one for the sum on the right,
-                       ; two for vertical separators on each
+                     3 ; one for the letters on the left, one for the sum on the right, two for vertical
+                       ; separators on each, minus one because vec:length is off-by-one
                      ))
     (print-header! out mat)
     (print-horiz-separator! out ncells)
     (iter:for-each! (uncurry (print-row! out))
                     (iter:vector-iter mat))
     (print-horiz-separator! out ncells)
-    (print-footer! out mat)))
+    (print-footer! out mat (list:length words))))
 
 (define-command "matrix" "display a matrix of counts of remaining words by first letter and length"
     (_ out puz)
   (print-matrix! out (view:get .available-words puz)))
+
+;; number of pangrams available
+
+(define-command "pangrams" "display the number of available pangrams"
+    (_ out puz)
+  (let count-by! =
+    (fn (tst?)
+      (iter:count! (iter:filter! tst? (iter:list-iter (view:get .available-words puz))))))
+
+  (let pangrams = (count-by! pangram?))
+  (let perfect-pangrams = (count-by! (fn (word)
+                                       (and (pangram? word)
+                                            (== (str:length word) 7)))))
+  (file:write-string! out "pangrams: ")
+  (file:show! out pangrams)
+  (when (> perfect-pangrams 0)
+    (file:write-char! out #\()
+    (file:show! out perfect-pangrams)
+    (file:write-string! out " perfect)"))
+  (file:newline! out))
 
 ;; the game itself
 
