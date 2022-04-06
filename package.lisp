@@ -9,7 +9,8 @@
                     (#:bit :coalton-library/bits)
                     (#:char :coalton-library/char)
                     (#:alex :alexandria)
-                    (#:cell :coalton-library/cell)))
+                    (#:cell :coalton-library/cell)
+                    (#:ht :coalton-library/hashtable)))
 (cl:in-package :spellingbee/package)
 
 ;;; iter extensions
@@ -288,12 +289,12 @@
     (define (file:show! file com)
       (match com
         ((Command name description _)
-         (progn 
+         (progn
            (file:write-char! file #\:)
            (file:write-string! file name)
            (file:write-string! file " - ")
            (file:write-line! file description))))))
-  
+
   (declare commands (cell:Cell (List Command)))
   (define commands (cell:new Nil))
 
@@ -442,6 +443,154 @@ Available commands are:")
       (file:show! out com)))
   (iter:for-each! print-command
                   (iter:list-iter (cell:read commands))))
+
+;; matrix-based hints
+
+(coalton-toplevel
+  (declare ht-get-or-insert! ((Hash :key) =>
+                              (:key -> :value)
+                              -> (Hashtable :key :value)
+                              -> :key
+                              -> :value))
+  (define (ht-get-or-insert! default ht key)
+    (match (ht:get ht key)
+      ((Some val) val)
+      ((None) (progn (let val = (default key))
+                     (ht:set! ht key val)
+                     val))))
+
+  (declare vec-of-zeros (UFix -> (Vector UFix)))
+  (define (vec-of-zeros len)
+    (lisp (Vector UFix) (len)
+      (cl:make-array len
+                     :initial-element 0
+                     :element-type 'cl:t
+                     :adjustable 'cl:t
+                     :fill-pointer len)))
+
+  (declare vec-update! ((:elt -> :elt) -> (Vector :elt) -> Integer -> Unit))
+  (define (vec-update! func vec idx)
+    (let old = (expect "OOB in `vec-update!'"
+                       (vec:index idx vec)))
+    (let new = (func old))
+    (vec:set! idx new vec))
+
+  (declare compute-matrix ((List String) -> (Vector (Tuple Char (Vector UFix)))))
+  (define (compute-matrix words)
+    (let ht = (ht:with-capacity 7))
+    (let longest = (into (expect "No words in `compute-matrix'"
+                                 (iter:max! (map str:length (iter:list-iter words))))))
+
+    (let make-vec =
+      (the (:any -> (Vector UFix))
+           (fn (_)
+             (vec-of-zeros (- longest 3)))))
+
+    (let get-vec =
+      (fn (char)
+        (ht-get-or-insert! make-vec ht char)))
+
+    (iter:for-each!
+     (fn (word)
+       (let first-letter = (expect "Word of length zero in `compute-matrix'"
+                                   (str:ref word 0)))
+       (let vec = (get-vec first-letter))
+       (let len = (str:length word))
+       (vec-update! 1+ vec (- len 4)))
+
+     (iter:list-iter words))
+
+    (into (the (List (Tuple Char (Vector UFix))) (ht:entries ht))))
+
+  (declare write-width-3! (file:Output -> Integer -> Unit))
+  (define (write-width-3! out int)
+    (view:destructuring-let ((file::%Output stream) out)
+      (lisp :any (stream int)
+        (cl:format stream "~3d" int)))
+    Unit)
+
+  (declare dotimes ((Num :int) (Ord :int) => :int -> (:int -> :any) -> Unit))
+  (define (dotimes n thunk)
+    (iter:for-each! thunk
+                    (iter:up-to n)))
+
+  (declare print-horiz-separator! ((Num :int) (Ord :int) => (file:Output -> :int -> Unit)))
+  (define (print-horiz-separator! out length-in-cells)
+    (dotimes (* 3 length-in-cells)
+      (fn (_) (file:write-char! out #\-)))
+    (file:newline! out))
+
+  (declare print-header! (file:Output -> (Vector (Tuple Char (Vector UFix))) -> Unit))
+  (define (print-header! out mat)
+    (file:write-string! out "   ")
+    (print-vert-separator! out)
+    (dotimes (vec:length mat)
+      (fn (idx)
+        (write-width-3! out (+ 4 idx))))
+    (print-vert-separator! out)
+    (write-centered-3! out #\greek_capital_letter_sigma)
+    (file:newline! out))
+
+  (declare write-centered-3! (file:Output -> Char -> Unit))
+  (define (write-centered-3! out ch)
+    (file:write-char! out #\space)
+    (file:write-char! out ch)
+    (file:write-char! out #\space))
+
+  (declare print-vert-separator! (file:Output -> Unit))
+  (define (print-vert-separator! file)
+    (write-centered-3! file #\|))
+
+  (declare print-row! (file:Output -> Char -> (Vector UFix) -> Unit))
+  (define (print-row! out ch row)
+    (write-centered-3! out ch)
+    (print-vert-separator! out)
+
+    (iter:for-each! (fn (count)
+                      (write-width-3! out (into count)))
+                    (iter:vector-iter row))
+
+    (print-vert-separator! out)
+
+    (write-width-3! out (into (iter:sum! (iter:vector-iter row))))
+
+    (file:newline! out))
+
+  (declare print-footer! (file:Output -> (Vector (Tuple Char (Vector UFix))) -> Unit))
+  (define (print-footer! out mat)
+    (write-centered-3! out #\greek_capital_letter_sigma)
+    (print-vert-separator! out)
+
+    (let column-sum =
+      (fn (col-idx)
+        (into (iter:sum! (map (compose (expect "Row too short in `print-footer!' `column-sum'")
+                                       (compose (vec:index col-idx)
+                                                snd))
+                              (iter:vector-iter mat))))))
+
+    (view:destructuring-let ((Tuple _ row0) (expect "no rows in `print-footer!'"
+                                                    (vec:index 0 mat)))
+      (dotimes (vec:length row0)
+        (compose (write-width-3! out) column-sum)))
+    (file:newline! out))
+
+  (declare print-matrix! (file:Output -> (List String) -> Unit))
+  (define (print-matrix! out words)
+    (let mat = (compute-matrix words))
+    (let ncells = (+ (fromInt (vec:length mat))
+                     4 ; one for the letters on the left, one for the sum on the right,
+                       ; two for vertical separators on each
+                     ))
+    (print-header! out mat)
+    (print-horiz-separator! out ncells)
+    (iter:for-each! (uncurry (print-row! out))
+                    (iter:vector-iter mat))
+    (print-horiz-separator! out ncells)
+    (print-footer! out mat)))
+
+(define-command "matrix" "display a matrix of counts of remaining words by first letter and length"
+    (_ out puz)
+  (print-matrix! out (view:get .available-words puz)))
 
 ;; the game itself
 

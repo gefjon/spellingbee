@@ -11,4 +11,5 @@
                                  :coalton-library/vector
                                  :coalton-library/string
                                  :coalton-library/iterator
-                                 :coalton-library/cell))
+                                 :coalton-library/cell
+                                 :coalton-library/hashtable))
